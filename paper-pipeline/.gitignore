@@ -1,0 +1,21 @@
+# Secrets & local config
+.env
+
+# Airflow runtime
+airflow_home/
+*.log
+logs/
+
+# Local data (DB + converted markdown) — never commit the database
+data/
+paper-pipeline-data/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store

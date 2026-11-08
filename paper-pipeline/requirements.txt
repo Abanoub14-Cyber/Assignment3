@@ -1,0 +1,4 @@
+# Pipeline dependencies (install Airflow itself separately — see README).
+pymupdf4llm>=0.0.17      # PDF -> Markdown
+openai>=1.30             # OpenAI-compatible client for the local LLM (LM Studio)
+requests>=2.31           # Discord webhook

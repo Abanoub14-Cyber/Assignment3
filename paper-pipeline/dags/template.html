@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research Library</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #181b22; --text: #e8eaed; --muted: #9aa0a6;
+    --accent: #6ea8fe; --border: #2a2e37; --chip: #22303f;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#f6f7f9; --card:#fff; --text:#1a1c20; --muted:#5f6368;
+      --accent:#1a73e8; --border:#e3e5e8; --chip:#e8f0fe;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.5;
+  }
+  header { padding: 2rem 1rem 1rem; max-width: 980px; margin:0 auto; }
+  h1 { margin:0 0 .25rem; font-size: 1.6rem; }
+  .meta { color:var(--muted); font-size:.85rem; }
+  .controls {
+    max-width:980px; margin:1rem auto; padding:0 1rem;
+    display:flex; gap:.75rem; flex-wrap:wrap;
+  }
+  input, select {
+    padding:.6rem .8rem; border:1px solid var(--border); border-radius:10px;
+    background:var(--card); color:var(--text); font-size:.95rem;
+  }
+  input { flex:1; min-width:200px; }
+  main { max-width:980px; margin:0 auto; padding:0 1rem 3rem; }
+  .card {
+    background:var(--card); border:1px solid var(--border); border-radius:14px;
+    padding:1.1rem 1.2rem; margin-bottom:1rem;
+  }
+  .card h2 { margin:0 0 .4rem; font-size:1.1rem; }
+  .card .cat {
+    display:inline-block; font-size:.72rem; color:var(--accent);
+    background:var(--chip); padding:.15rem .55rem; border-radius:999px;
+    margin-bottom:.5rem;
+  }
+  .card p { margin:.4rem 0; color:var(--text); }
+  .kw { margin-top:.5rem; display:flex; gap:.4rem; flex-wrap:wrap; }
+  .kw span {
+    font-size:.72rem; color:var(--muted); border:1px solid var(--border);
+    padding:.1rem .5rem; border-radius:999px;
+  }
+  .file { font-size:.75rem; color:var(--muted); margin-top:.5rem; }
+  .empty { color:var(--muted); text-align:center; padding:3rem 1rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📚 Research Library</h1>
+  <div class="meta">__COUNT__ paper(s) · generated __GENERATED__</div>
+</header>
+
+<div class="controls">
+  <input id="q" type="search" placeholder="Search title, summary, keywords…" autocomplete="off">
+  <select id="cat">
+    <option value="">All categories</option>
+    __OPTIONS__
+  </select>
+</div>
+
+<main id="list"></main>
+
+<script>
+  const PAPERS = __DATA_JSON__;
+  const list = document.getElementById('list');
+  const q = document.getElementById('q');
+  const cat = document.getElementById('cat');
+
+  function render() {
+    const term = q.value.trim().toLowerCase();
+    const c = cat.value;
+    const shown = PAPERS.filter(p => {
+      const inCat = !c || p.category === c;
+      const hay = (p.title + ' ' + p.summary + ' ' +
+                   (p.keywords || []).join(' ')).toLowerCase();
+      return inCat && (!term || hay.includes(term));
+    });
+    if (shown.length === 0) {
+      list.innerHTML = '<div class="empty">No papers match your search.</div>';
+      return;
+    }
+    list.innerHTML = shown.map(p => `
+      <article class="card">
+        <span class="cat">${p.category}</span>
+        <h2>${p.title}</h2>
+        <p>${p.summary}</p>
+        <div class="kw">${(p.keywords || []).map(k => `<span>${k}</span>`).join('')}</div>
+        <div class="file">${p.filename}</div>
+      </article>`).join('');
+  }
+  q.addEventListener('input', render);
+  cat.addEventListener('change', render);
+  render();
+</script>
+</body>
+</html>
