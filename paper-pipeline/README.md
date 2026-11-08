@@ -16,7 +16,7 @@ init_db → scan → convert → summarize → store → build_html → notify
 ```
 paper-pipeline/
 ├── dags/
-│   ├── paper_pipeline.py   # the Airflow DAG (orchestration only)
+│   ├── paper_pipeline.py   # the Airflow DAG 
 │   ├── paper_lib.py        # all the logic (DB, PDF, LLM, HTML, Discord)
 │   └── template.html       # HTML template for the generated page
 ├── requirements.txt
@@ -25,7 +25,7 @@ paper-pipeline/
 └── README.md
 ```
 
-PDFs and the generated `index.html` live in the Google Drive–synced folder; the
+PDFs and the generated index.html live in the Google Drive–synced folder; the
 SQLite database is kept **outside** it (syncing a live database would corrupt it).
 
 ## Prerequisites
@@ -56,7 +56,7 @@ model, and **start the server** (it serves `http://localhost:1234/v1`).
 ```bash
 cp .env.example .env
 ```
-Edit `.env`: set your Google Drive paths and paste your **Discord webhook URL**
+Edit `.env`: set the Google Drive paths (here we did it with a local folder outside the project's folder, we didn't setup a real Google Drive) and paste your **Discord webhook URL**
 (Discord → Edit Channel → Integrations → Webhooks → New Webhook → Copy URL).
 
 **4. Run Airflow.**
@@ -68,8 +68,8 @@ This prints an admin password and serves the UI at **http://localhost:8080**.
 Log in as `admin`.
 
 **5. Process a paper.**
-Drop a PDF into your `papers/` folder, then in the UI enable the **`paper_pipeline`**
-DAG and click **Trigger ▶**. When it finishes, open `output/index.html` and check
+Drop a PDF into your **papers/** folder, then in the UI enable the **paper_pipeline**
+DAG and click **Trigger**. When it finishes, open `output/index.html` and check
 your Discord channel.
 
 To run the whole DAG once from the terminal (useful for debugging):
@@ -79,8 +79,5 @@ airflow dags test paper_pipeline
 
 ## Notes
 
-- `.env` is never committed (it holds your webhook); only `.env.example` is.
-- The pipeline is **idempotent**: already-processed PDFs (matched by filename) are
-  skipped, so re-runs only handle genuinely new papers.
 - Database schema: `filename` (primary key), `title`, `summary`,
   `keywords` (JSON string), `category`, `created_at`.
