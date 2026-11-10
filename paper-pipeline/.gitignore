@@ -2,7 +2,7 @@
 .env
 
 # Airflow runtime
-airflow_home/
+airflow/**
 *.log
 logs/
 

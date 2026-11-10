@@ -1,9 +1,10 @@
+
 """
 paper_pipeline.py — Apache Airflow DAG for INFO-H420 Assignment 3.
 
 Turns research PDFs into a searchable study library:
 
-    init_db -> scan -> convert -> summarize -> store -> build_html -> notify
+    scan -> convert -> summarize -> store -> build_html -> notify
 
 All the real logic lives in paper_lib.py; this file only wires the tasks.
 """
@@ -19,12 +20,14 @@ except ImportError:  # pragma: no cover
     from airflow.decorators import dag, task
 
 import paper_lib
+import logging
 
+log = logging.getLogger(__name__)
 
 @dag(
     dag_id="paper_pipeline",
     description="Convert research PDFs into a searchable study library",
-    schedule=timedelta(minutes=10),      # scheduled DAG that looks for new PDFs
+    schedule=timedelta(minutes=2),      # scheduled DAG that looks for new PDFs
     start_date=datetime(2026, 1, 1),
     catchup=False,
     max_active_runs=1,                   # avoid two runs touching the DB at once
@@ -34,68 +37,56 @@ import paper_lib
 def paper_pipeline():
 
     @task
-    def init_db() -> None:
-        """Create the SQLite table if it does not exist yet."""
-        paper_lib.init_db()
-
-    @task
     def scan() -> list[str]:
         """Return PDF filenames present in papers/ but not yet in the database."""
         new_files = paper_lib.scan_for_new_pdfs()
-        print(f"[scan] {len(new_files)} new PDF(s): {new_files}")
+        log.info("[scan] %d new PDF(s): %s", len(new_files), new_files)
         return new_files
 
     @task
-    def convert(new_files: list[str]) -> list[dict]:
-        """Convert each new PDF to Markdown. Returns [{filename, md_path}, ...]."""
-        results = []
-        for filename in new_files:
-            md_path = paper_lib.pdf_to_markdown(filename)
-            print(f"[convert] {filename} -> {md_path}")
-            results.append({"filename": filename, "md_path": md_path})
-        return results
-
+    def convert(filename: str) -> dict[str, str]:
+        """Convert new PDF to Markdown. Returns [{filename, md_path}, ...]."""
+        md_path = paper_lib.pdf_to_markdown(filename)
+        log.info("[convert] %s -> %s", filename, md_path)
+        return {"filename": filename, "md_path": md_path}
+    
     @task
-    def summarize(converted: list[dict]) -> list[dict]:
+    def summarize(item: dict[str, str]) -> dict:
         """Ask the local LLM for title/summary/keywords/category for each paper."""
-        metas = []
-        for item in converted:
-            meta = paper_lib.summarize_markdown(item["filename"], item["md_path"])
-            print(f"[summarize] {meta['filename']} -> {meta['title']!r}")
-            metas.append(meta)
-        return metas
+        meta = paper_lib.summarize_markdown(item["filename"], item["md_path"])
+        log.info("[summarize] %s -> %s", meta["filename"], meta)
+        return meta
 
-    @task
-    def store(metas: list[dict]) -> list[dict]:
+    @task(max_active_tis_per_dagrun=1)  # avoid concurrent SQLite writes
+    def store(meta: dict) -> dict:
         """Write one row per paper to SQLite."""
-        for meta in metas:
-            paper_lib.save_paper(meta)
-            print(f"[store] saved {meta['filename']}")
-        return metas
-
+        paper_lib.save_paper(meta)
+        log.info("[store] saved %s", meta["filename"])
+        return meta
+    
     @task
-    def build_html(metas: list[dict]) -> str:
-        """Regenerate the static index.html listing all papers."""
+    def build_html() -> str:
+        """
+        Regenerate the static index.html listing all papers.
+        The parameter is not used, but only present to create a dependency on the store() tasks.
+        """
         out = paper_lib.generate_html()
-        print(f"[html] wrote {out}")
+        log.info("[html] wrote %s", out)
         return out
-
-    @task(trigger_rule="all_done")
+    
+    @task
     def notify(metas: list[dict]) -> None:
-        """Send a Discord webhook for each newly processed paper."""
-        for meta in metas or []:
-            sent = paper_lib.send_discord_notification(meta)
-            print(f"[notify] {meta['filename']}: {'sent' if sent else 'skipped'}")
+        """Send one Discord summary (split into chunks if long) for this run's papers."""
+        sent = paper_lib.send_discord_notification(list(metas))
+        log.info("[notify] %d message(s) sent for %d paper(s)", sent, len(metas))
 
-    # ----- task dependencies (this is the DAG graph) ----------------------- #
-    new_files = scan()
-    converted = convert(new_files)
-    metas = summarize(converted)
-    stored = store(metas)
-    html = build_html(stored)
+    
 
-    init_db() >> new_files          # make sure the table exists before scanning
-    html >> notify(stored)          # notify only after the site is rebuilt
-
-
+    # ----- Task wiring ------------------------------------------------------
+    papers = scan()
+    converted = convert.expand(filename=papers)
+    metadata = summarize.expand(item=converted)
+    stored = store.expand(meta=metadata)
+    stored >> build_html() >> notify(metadata)
+    
 paper_pipeline()

@@ -24,10 +24,9 @@ from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
-import pymupdf4llm                 # PDF -> Markdown
-import requests                    # Discord webhook
-from openai import OpenAI          # OpenAI-compatible client for the local LLM
+import logging
 
+log = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Configuration (read from environment variables; see .env.example)           #
@@ -60,31 +59,33 @@ TEMPLATE_PATH = Path(__file__).resolve().parent / "template.html"
 # --------------------------------------------------------------------------- #
 # Database                                                                    #
 # --------------------------------------------------------------------------- #
-def init_db(db_path: Path = DB_PATH) -> None:
-    """Create the papers table if it does not exist. Safe to call every run."""
+
+
+def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
+    """Create the papers table if it does not exist."""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS papers (
-                filename   TEXT PRIMARY KEY,   -- unique, as per the assignment
-                title      TEXT NOT NULL,
-                summary    TEXT NOT NULL,
-                keywords   TEXT NOT NULL,       -- stored as a JSON string
-                category   TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS papers (
+            filename   TEXT PRIMARY KEY,   -- unique, as per the assignment
+            title      TEXT NOT NULL,
+            summary    TEXT NOT NULL,
+            keywords   TEXT NOT NULL,       -- stored as a JSON string
+            category   TEXT NOT NULL,
+            created_at TEXT NOT NULL
         )
-        conn.commit()
-
+        """
+    )
+    return conn
 
 def already_processed(db_path: Path = DB_PATH) -> set[str]:
     """Return the set of filenames already in the database."""
     if not Path(db_path).exists():
+        print(f"[scan] DB {db_path} does not exist yet; no papers processed")
         return set()
-    with sqlite3.connect(db_path) as conn:
+    with connect(db_path) as conn:
         rows = conn.execute("SELECT filename FROM papers").fetchall()
     return {r[0] for r in rows}
 
@@ -94,7 +95,9 @@ def scan_for_new_pdfs(
 ) -> list[str]:
     """List PDF filenames that exist in papers_dir but not yet in the DB."""
     papers_dir = Path(papers_dir)
+    print(f"[scan] scanning {papers_dir} for new PDFs...")
     if not papers_dir.exists():
+        log.warning("[scan] papers_dir %s does not exist yet; no PDFs found", papers_dir)
         return []
     done = already_processed(db_path)
     found = sorted(p.name for p in papers_dir.glob("*.pdf"))
@@ -103,7 +106,7 @@ def scan_for_new_pdfs(
 
 def save_paper(meta: dict, db_path: Path = DB_PATH) -> None:
     """Insert (or replace) one paper row. `keywords` is serialised to JSON."""
-    with sqlite3.connect(db_path) as conn:
+    with connect(db_path) as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO papers
@@ -126,7 +129,7 @@ def load_all_papers(db_path: Path = DB_PATH) -> list[dict]:
     """Return every paper as a dict, keywords parsed back into a list."""
     if not Path(db_path).exists():
         return []
-    with sqlite3.connect(db_path) as conn:
+    with connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT * FROM papers ORDER BY created_at DESC"
@@ -151,6 +154,7 @@ def pdf_to_markdown(
     markdown_dir: Path = MARKDOWN_DIR,
 ) -> str:
     """Convert one PDF to Markdown with PyMuPDF4LLM; cache it; return the path."""
+    import pymupdf4llm                 # PDF -> Markdown
     markdown_dir = Path(markdown_dir)
     markdown_dir.mkdir(parents=True, exist_ok=True)
 
@@ -159,6 +163,7 @@ def pdf_to_markdown(
 
     md_path = markdown_dir / (Path(filename).stem + ".md")
     md_path.write_text(md_text, encoding="utf-8")
+    log.info("[convert] %s -> %s (%d chars)", filename, md_path, len(md_text))
     return str(md_path)
 
 
@@ -237,6 +242,8 @@ def summarize_markdown(
     Retries once if the model returns something that is not valid JSON, as the
     assignment allows ("If parsing fails, retry once").
     """
+    from openai import OpenAI          # OpenAI-compatible client for the local LLM
+    
     client = OpenAI(api_key=api_key, base_url=base_url)
     content = Path(md_path).read_text(encoding="utf-8")[:max_chars]
     messages = [
@@ -248,7 +255,7 @@ def summarize_markdown(
     for attempt in range(2):  # initial try + one retry
         try:
             # Ask for JSON mode; some servers may not support it, so fall back.
-            kwargs = dict(model=model, messages=messages, temperature=0)
+            kwargs = dict(model=model, messages=messages, temperature=0, reasoning_effort="none")
             if attempt == 0:
                 kwargs["response_format"] = {"type": "json_object"}
             completion = client.chat.completions.create(**kwargs)
@@ -256,6 +263,7 @@ def summarize_markdown(
             return _normalize(_extract_json(raw), filename)
         except Exception as exc:  # retry once on any failure
             last_error = exc
+            log.error("Attempt %d failed for %s: %s", attempt, filename, exc)
             continue
     raise RuntimeError(
         f"LLM did not return valid JSON for {filename}: {last_error}"
@@ -295,21 +303,34 @@ def generate_html(output_dir: Path = OUTPUT_DIR, db_path: Path = DB_PATH) -> str
 # --------------------------------------------------------------------------- #
 # Discord notification                                                        #
 # --------------------------------------------------------------------------- #
-def send_discord_notification(
-    meta: dict, webhook_url: str = DISCORD_WEBHOOK_URL
-) -> bool:
-    """Post a message to a Discord webhook. Returns True if sent."""
-    if not webhook_url:
-        return False  # not configured -> skip quietly
+DISCORD_LIMIT = 1900  # real limit is 2000; leave some margin
 
-    kw = ", ".join(meta.get("keywords", []))
-    content = (
-        f"📄 **New paper processed**\n"
-        f"**{meta['title']}**\n"
-        f"_{meta['category']}_ · `{meta['filename']}`\n"
-        f"{meta['summary']}\n"
-        f"🔖 {kw}"
-    )
-    resp = requests.post(webhook_url, json={"content": content[:1900]}, timeout=15)
-    resp.raise_for_status()
-    return True
+
+def _chunk_lines(header: str, lines: list[str], limit: int = DISCORD_LIMIT) -> list[str]:
+    """Group lines into messages of at most `limit` characters, never splitting a line."""
+    chunks, current = [], header
+    for line in lines:
+        line = line[:200]                         # guard against one absurdly long title
+        if len(current) + len(line) + 1 > limit:  # +1 for the newline
+            chunks.append(current)
+            current = "(continued)"
+        current += "\n" + line
+    chunks.append(current)
+    return chunks
+
+
+def send_discord_notification(
+    metas: list[dict], webhook_url: str = DISCORD_WEBHOOK_URL
+) -> int:
+    import requests
+    """Post one summary of the newly processed papers. Returns the number of messages sent."""
+    if not webhook_url or not metas:
+        return 0
+
+    header = f"📄 **{len(metas)} new paper(s) processed**"
+    lines = [f"• **{m['title']}** (_{m['category']}_)" for m in metas]
+
+    messages = _chunk_lines(header, lines)
+    for content in messages:
+        requests.post(webhook_url, json={"content": content}, timeout=15).raise_for_status()
+    return len(messages)
